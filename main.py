@@ -1,3 +1,4 @@
+import sys
 import copy
 import gspread
 import os
@@ -8,28 +9,37 @@ from pprint import pprint
 from prettytable import PrettyTable
 
 # Colors to print with
-R = "\033[0;31;40m"  # RED
-G = "\033[0;32;40m"  # GREEN
-N = "\033[0m"  # Reset
+R = "\033[0;31;40m"  # RED Color
+G = "\033[0;32;40m"  # GREEN Color
+N = "\033[0m"  # Reset Color
 
-stockAPIToken = (os.environ["FINNHUB_TOKEN"])
+stockAPIToken = (os.environ["TD_TOKEN"])
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/spreadsheets",
          "https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
 
 credentials = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-
 client = gspread.authorize(credentials)
 
-sheet = client.open("Investments").sheet1
+investments = {}  # Initialize dictionary of different investment types.
+totalProfitLoss = 0.00
+processedInvestmentOrders = ["", "", 0, 0.00, 0, 0.00, "", "", ""]
+# +----------------------------------------------Stock Data----------------------------------------------+
+stock_sheet = client.open("Investments").sheet1
+stock_data = stock_sheet.get_all_records()  # Assume rows are from oldest to newest.
+# +----------------------------------------------Stock Data----------------------------------------------+
+# +----------------------------------------------Wheel Data----------------------------------------------+
+# +----------------------------------------------Wheel Data----------------------------------------------+
+wheel_sheet = client.open("Investments").worksheet("Wheel")
+wheel_data = wheel_sheet.get_all_records()  # Assume rows are from oldest to newest.
+# +----------------------------------------------Option Data---------------------------------------------+
+option_sheet = client.open("Investments").worksheet("Options")
+option_data = option_sheet.get_all_records()  # Assume rows are from oldest to newest.
+# +----------------------------------------------Option Data---------------------------------------------+
 
-data = sheet.get_all_records()  # Assume rows are from oldest to newest.
 
-stocks_total_profit_loss = 0.00
-stocks = {}  # Initialize dictionary of different investment types.
-
-
-def calculate_percentage(current_value, initial_value):
+# +-----------------------------------------------Function-----------------------------------------------+
+def calculate_percentage(current_value, initial_value, investment_type):
     if current_value > 0.00:
         percentage = round((((current_value / initial_value) - 1) * 100), 2)
         if percentage > 0.00:
@@ -37,20 +47,64 @@ def calculate_percentage(current_value, initial_value):
         else:
             percentage_output = "{:s}{:s}%{:s}".format(R, str(percentage), N)
     else:
-        percentage_output = "{:s}+0.00%{:s}".format(N, N)
+        if investment_type == "stock" or initial_value == 0.00:
+            percentage_output = "{:s}+0.00%{:s}".format(N, N)
+        else:
+            percentage_output = "{:s}-100.00%{:s}".format(R, N)
     return percentage_output
 
 
-def process_orders(ticker_symbol, current_price):
-    buy_history_copy = copy.deepcopy(stocks[ticker_symbol]["buyHistory"])
-    sell_history_copy = copy.deepcopy(stocks[ticker_symbol]["sellHistory"])
-    full_name = stocks[ticker_symbol]["fullName"]
+def calculate_total_table():
+    stocks_total_profit_loss_rounded = round(totalProfitLoss, 2)
+    if stocks_total_profit_loss_rounded >= 0.00:
+        stocks_total_profit_loss_cell = ["{:s}+${:s}{:s}".format(G, str(stocks_total_profit_loss_rounded), N)]
+    else:
+        stocks_total_profit_loss_cell = ["{:s}${:s}{:s}".format(R, str(stocks_total_profit_loss_rounded), N)]
+    return stocks_total_profit_loss_cell
+
+
+def process_sheet(data, investment_type):
+    for row in data:
+        ticker_symbol = row["Ticker"]
+        buy_or_sell = row["Buy/Sell"]
+        full_name = row[investment_type]
+
+        quantity = row["Quantity"]
+        buy_or_sell_price = row["Buy/Sell Price"]
+        order_date = row["Order Date"]
+        new_order = {"date": order_date, "price": buy_or_sell_price, "quantity": quantity}
+
+        if full_name in investments.keys():  # Stock already in dictionary
+            if buy_or_sell == "Buy":
+                buy_history = investments[full_name]["buyHistory"]
+                buy_history.append(new_order)  # Append buy order to buyHistory
+                investments[full_name]["buyHistory"] = buy_history
+            elif buy_or_sell == "Sell":
+                sell_history = investments[full_name]["sellHistory"]
+                sell_history.append(new_order)  # Append sell order to sellHistory
+                investments[full_name]["sellHistory"] = sell_history
+        else:  # Stock not in dictionary.
+            if buy_or_sell == "Buy":
+                investments[full_name] = {"ticker": ticker_symbol, "sellHistory": [],
+                                          "buyHistory": [
+                                              {"date": order_date, "price": float(buy_or_sell_price),
+                                               "quantity": quantity}
+                                          ]}
+            else:
+                print(Fore.RED + "First time seeing {:s} and it's not a buy order.".format(full_name))
+                sys.exit()
+
+
+def process_stock_option_orders(full_name, current_price, investment_type):
+    ticker_symbol = investments[full_name]["ticker"]
+    buy_history_copy = copy.deepcopy(investments[full_name]["buyHistory"])
+    sell_history_copy = copy.deepcopy(investments[full_name]["sellHistory"])
 
     total_sold = 0  # Keep track of how many were sold.
     total_remaining = 0  # Keep track of how many are left.
 
-    total_sold_value = 0.00  # Keep track of the value after being sold.
-    total_sold_value_by_initial_cost = 0.00  # Keep track of the value it was bought at.
+    total_sold_value = 0.00  # Keep track of total value of what was sold.
+    total_sold_value_by_initial_cost = 0.00  # Keep track of total value if it were sold at the value it was bought at.
 
     total_remaining_value = 0.00  # Keep track of total value by current price.
     total_remaining_value_by_initial_cost = 0.00  # Keep track of total value by buy in price.
@@ -90,9 +144,9 @@ def process_orders(ticker_symbol, current_price):
         total_remaining_value_by_initial_cost += (buy_price * buy_quantity)
         total_remaining += buy_quantity
 
-    realized_gain_loss_cell = calculate_percentage(total_sold_value, total_sold_value_by_initial_cost)
-    unrealized_gain_loss_cell = calculate_percentage(total_remaining_value, total_remaining_value_by_initial_cost)
-
+    realized_gain_loss_cell = calculate_percentage(total_sold_value, total_sold_value_by_initial_cost, investment_type)
+    unrealized_gain_loss_cell = calculate_percentage(total_remaining_value, total_remaining_value_by_initial_cost,
+                                                     investment_type)
     total_realized_unrealized = round((total_sold_value - total_sold_value_by_initial_cost) + \
                                       (total_remaining_value - total_remaining_value_by_initial_cost), 2)
     if total_realized_unrealized >= 0.00:
@@ -100,11 +154,17 @@ def process_orders(ticker_symbol, current_price):
     else:
         current_profit_loss_cell = "{:s}${:s}{:s}".format(R, str(total_realized_unrealized), N)
 
-    global stocks_total_profit_loss  # Keep track of total profit/loss
-    stocks_total_profit_loss += total_realized_unrealized
+    global totalProfitLoss  # Keep track of total profit/loss
+    totalProfitLoss += total_realized_unrealized
 
-    average_price = round((total_remaining_value_by_initial_cost / total_remaining), 2)
-    if average_price <= current_price:
+    if total_remaining > 0:
+        average_price = round((total_remaining_value_by_initial_cost / total_remaining), 2)
+    else:
+        average_price = 0.00  # No more shares left.
+
+    if average_price == 0.00 or currentPrice == 0.00:
+        average_price_cell = "{:s}${:s}{:s}".format(N, str(average_price), N)
+    elif average_price <= current_price:
         average_price_cell = "{:s}${:s}{:s}".format(G, str(average_price), N)
     else:
         average_price_cell = "{:s}${:s}{:s}".format(R, str(average_price), N)
@@ -115,49 +175,109 @@ def process_orders(ticker_symbol, current_price):
             current_profit_loss_cell, current_price_cell, average_price_cell]
 
 
-for row in data:
-    ticker = row["Ticker"]
-    buyOrSell = row["Buy/Sell"]
-    fullName = row["Investment"]
+# def process_wheel()
 
-    quantity = row["Quantity"]
-    buyOrSellPrice = row["Buy/Sell Price"]
-    orderDate = row["Order Date"]
-    newOrder = {"date": orderDate, "price": buyOrSellPrice, "quantity": quantity}
 
-    if ticker in stocks.keys():  # Stock already in dictionary
-        if buyOrSell == "Buy":
-            buyHistory = stocks[ticker]["buyHistory"]
-            buyHistory.append(newOrder)  # Append buy order to buyHistory
-            stocks[ticker]["buyHistory"] = buyHistory
-        elif buyOrSell == "Sell":
-            sellHistory = stocks[ticker]["sellHistory"]
-            sellHistory.append(newOrder)  # Append sell order to sellHistory
-            stocks[ticker]["sellHistory"] = sellHistory
-    else:  # Stock not in dictionary.
-        if buyOrSell == "Buy":
-            stocks[ticker] = {"fullName": fullName, "sellHistory": [],
-                              "buyHistory": [{"date": orderDate, "price": buyOrSellPrice, "quantity": quantity}]}
-        else:
-            print(Fore.RED + "First time seeing {:s} and it's not a buy order.".format(ticker))
+# +-----------------------------------------------Function-----------------------------------------------+
 
-pprint(stocks)
 
-stock_table = PrettyTable(["Ticker", "Name", "Sold", "Realized Gain/Loss (%)", "Remaining", "Unrealized Gain/Loss (%)",
-                           "Current Profit/Loss ($)", "Current Price ($)", "Average Price ($)"])
-for ticker in stocks.keys():
-    url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={stockAPIToken}"
-    currentPrice = requests.get(url).json()["c"]
-    stock_table.add_row(process_orders(ticker, currentPrice))
+# +----------------------------------------------Stock Tables----------------------------------------------+
+process_sheet(stock_data, "Stock")
 
-print(stock_table)
+stockTable = PrettyTable(["Ticker", "Sold", "Realized Gain/Loss (%)", "Remaining", "Unrealized Gain/Loss (%)",
+                          "Current Profit/Loss ($)", "Current Price ($)", "Average Price ($)"])
 
-total_table = PrettyTable(["Total Profit/Loss ($)"])
-stocks_total_profit_loss = round(stocks_total_profit_loss, 2)
-if stocks_total_profit_loss >= 0.00:
-    average_price_cell = ["{:s}+${:s}{:s}".format(G, str(stocks_total_profit_loss), N)]
-else:
-    average_price_cell = ["{:s}${:s}{:s}".format(R, str(stocks_total_profit_loss), N)]
-total_table.add_row(average_price_cell)
+for fullName in investments.keys():
+    ticker = investments[fullName]["ticker"]
+    url = f"https://api.tdameritrade.com/v1/marketdata/{ticker}/quotes"
+    payload = {
+        'apikey': stockAPIToken
+    }
+    stockInformation = requests.get(url=url, params=payload).json()
+    currentPrice = requests.get(url=url, params=payload).json()[ticker]['lastPrice']
+    processedInvestmentOrders = process_stock_option_orders(fullName, currentPrice, "stock")
+    stockTable.add_row(processedInvestmentOrders)
 
-print(total_table)
+print(stockTable)
+
+stockTotalTable = PrettyTable(["Stock Total Profit/Loss ($)"])
+
+stockTotalTable.add_row(calculate_total_table())
+
+print(stockTotalTable)
+# +----------------------------------------------Stock Tables----------------------------------------------+
+
+# +------------------------------------------Option Wheel Tables-------------------------------------------+
+process_sheet(wheel_data, "Wheel Contract")
+
+stockTable = PrettyTable(["Ticker", "Wheel Stock", "Sold", "Realized Gain/Loss (%)", "Remaining", "Unrealized Gain/Loss (%)",
+                          "Current Profit/Loss ($)", "Current Price ($)", "Average Price ($)"])
+
+print("processedStockOptionOrders", processedInvestmentOrders)
+print("investments", investments)
+print("totalProfitLoss", totalProfitLoss)
+# +------------------------------------------Option Wheel Tables-------------------------------------------+
+
+# investments.clear()  # Clear dictionary.
+# totalProfitLoss = 0.00
+#
+# # +----------------------------------------------Option Tables---------------------------------------------+
+# process_sheet(option_data, "Contract")
+#
+# optionTable = PrettyTable(["Ticker", "Contract", "Sold", "Realized Gain/Loss (%)",
+#                            "Remaining", "Unrealized Gain/Loss (%)",
+#                            "Current Profit/Loss ($)", "Current Price ($)", "Average Price ($)"])
+#
+# for fullName in investments.keys():
+#     fullNameSplit = fullName.split(" ", 4)  # Split Full Name by space to extract certain values.
+#     symbol = fullNameSplit[0]
+#     contractType = "CALL" if fullNameSplit[3] == "Call" else "PUT"
+#     strike = fullNameSplit[1]
+#     expirationDate = fullNameSplit[2]
+#     expirationDateSplit = expirationDate.split("/", 3)
+#     expirationDateFormatted = F"{expirationDateSplit[2]}-{expirationDateSplit[0]}-{expirationDateSplit[1]}"
+#     currentPrice = 0.00  # Default value for current option price.
+#
+#     url = F"https://api.tdameritrade.com/v1/marketdata/chains?" \
+#           F"&symbol={symbol}&contractType={contractType}&strike={strike}" \
+#           F"&fromDate={expirationDateFormatted}&toDate={expirationDateFormatted}'"
+#     payload = {
+#         'apikey': stockAPIToken
+#     }
+#     optionInformation = requests.get(url=url, params=payload).json()
+#     if optionInformation["status"] == "SUCCESS":
+#         if contractType == "CALL":
+#             expirationDateMap = optionInformation["callExpDateMap"]
+#         else:
+#             expirationDateMap = optionInformation["putExpDateMap"]
+#         expirationDateMapKeys = list(expirationDateMap.keys())
+#         if len(expirationDateMapKeys) == 1:
+#             expirationDateMapEntry = expirationDateMap[expirationDateMapKeys[0]]
+#             expirationDateMapEntryKeys = list(expirationDateMapEntry.keys())
+#             if len(expirationDateMapEntryKeys) == 1:
+#                 contractList = expirationDateMapEntry[expirationDateMapEntryKeys[0]]
+#                 if len(contractList) == 1:
+#                     contractInformation = contractList[0]
+#                     currentPrice = contractInformation["mark"]
+#                 else:
+#                     print("More than contractList returned by API for {:s}.".format(fullName))
+#             else:
+#                 print("More than one expirationDateMapEntryKeys returned by API for {:s}.".format(fullName))
+#         else:
+#             print("More than one expirationDateMapKeys entry returned by API for {:s}.".format(fullName))
+#             sys.exit()
+#     # else:
+#     #     print("Invalid API call for {:s} most likely expired.".format(fullName))
+#
+#     optionTable.add_row(process_stock_option_orders(fullName, currentPrice, "option"))
+#
+# print(optionTable)
+#
+# optionTotalTable = PrettyTable(["Options Total Profit/Loss ($)"])
+#
+# optionTotalTable.add_row(calculate_total_table())
+#
+# print(optionTotalTable)
+# # +----------------------------------------------Option Tables---------------------------------------------+
+
+print(Fore.RESET)

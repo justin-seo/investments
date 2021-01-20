@@ -1,1 +1,1 @@
-pip install gspread oauth2client
+pip3 install gspread oauth2client colorama prettytable
